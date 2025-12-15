@@ -1,0 +1,18 @@
+{
+  "_comment": "Agentic Configuration File - Copy to agentic.config.json to use",
+  
+  "disable_semantic_search": false,
+  "_disable_semantic_search_help": "Set to true if you cannot run embedding models",
+  
+  "llm_provider": "openrouter",
+  "_llm_provider_help": "Use 'openrouter' (default) or 'custom' for enterprise LLM",
+  
+  "openrouter_model": "anthropic/claude-sonnet-4-20250514",
+  "_openrouter_model_help": "Model to use with OpenRouter API",
+  
+  "max_tool_rounds": 20,
+  "context_limit": 200000,
+  "max_execution_attempts": 3,
+  "debug_logging": true
+}
+
