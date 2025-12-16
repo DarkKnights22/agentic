@@ -28,10 +28,11 @@ from rich.live import Live
 from rich.table import Table
 
 from .master_agent import MasterAgent
-from .openrouter_client import DEFAULT_MODEL
+from .openrouter_client import DEFAULT_MODEL, OpenRouterClient
 from .execution_engine import ExecutionEngine, ExecutionStatus
 from .context_discovery_agent import ContextDiscoveryAgent, DiscoveredContext
 from .config import AgenticConfig, get_config
+from .doc_agent import DocumentationAgent, DocAgentConfig
 
 
 # Custom theme for the CLI
@@ -447,10 +448,133 @@ class AgenticCLI:
             raise
 
 
+async def run_documentation(
+    repo_path: Path,
+    api_key: Optional[str],
+    model: str,
+    mode: str = "full",
+):
+    """
+    Run the Documentation Agent.
+
+    Args:
+        repo_path: Path to the repository
+        api_key: OpenRouter API key
+        model: Model to use
+        mode: "full", "resume", or "update"
+    """
+    console.print()
+    console.print(Panel(
+        "[bold]Documentation Agent[/]\n"
+        "Phased codebase exploration with long-term memory",
+        border_style="cyan"
+    ))
+    console.print()
+
+    console.print(f"[info]Repository:[/] {repo_path}")
+    console.print(f"[info]Mode:[/] {mode}")
+    console.print()
+
+    # Create LLM client
+    llm = OpenRouterClient(api_key=api_key, model=model)
+
+    # Status callback for live updates
+    def status_callback(message: str):
+        if "[Phase:" in message or "[Component" in message:
+            console.print(message, style="cyan")
+        else:
+            console.print(message, style="muted")
+
+    try:
+        config = DocAgentConfig(debug_logging=True, on_status=status_callback)
+        agent = DocumentationAgent(repo_path, llm, config)
+
+        console.print(f"[info]Session:[/] {agent.session_id}")
+        console.print()
+
+        if mode == "full":
+            console.print("[muted]Starting full documentation run...[/]")
+            console.print("[muted]This will explore the codebase in phases and generate docs.[/]")
+            console.print()
+
+            result = await agent.run_full_documentation()
+
+        elif mode == "resume":
+            if not agent.orchestrator.can_resume():
+                console.print("[warning]No session to resume. Starting fresh.[/]")
+                result = await agent.run_full_documentation()
+            else:
+                console.print("[muted]Resuming from last saved state...[/]")
+                result = await agent.resume()
+
+        elif mode == "update":
+            console.print("[muted]Checking for changed files...[/]")
+            result = await agent.update_documentation()
+
+        else:
+            console.print(f"[error]Unknown mode: {mode}[/]")
+            return
+
+        # Display results
+        console.print()
+        console.print(Rule("Results", style="green"))
+        console.print()
+
+        if result.get("errors"):
+            console.print("[warning]Errors encountered:[/]")
+            for err in result["errors"]:
+                console.print(f"  [error]• {err}[/]")
+            console.print()
+
+        if result.get("phases_completed"):
+            console.print("[success]Phases completed:[/]")
+            for phase in result["phases_completed"]:
+                console.print(f"  [success]✓[/] {phase}")
+            console.print()
+
+        if result.get("documentation"):
+            console.print("[success]Documentation generated:[/]")
+            for doc in result["documentation"]:
+                console.print(f"  [info]•[/] {doc}")
+            console.print()
+
+        if result.get("changed_files"):
+            console.print("[info]Changed files detected:[/]")
+            for f in result["changed_files"][:10]:
+                console.print(f"  • {f}")
+            if len(result["changed_files"]) > 10:
+                console.print(f"  ... and {len(result['changed_files']) - 10} more")
+            console.print()
+
+        # Show memory summary
+        memory_summary = agent.get_memory_summary()
+        console.print("[info]Memory Summary:[/]")
+        console.print(f"  • Phase: {memory_summary.get('current_phase', 'unknown')}")
+        console.print(f"  • Components discovered: {memory_summary.get('components_discovered', 0)}")
+        console.print(f"  • Components explored: {memory_summary.get('components_explored', 0)}")
+        console.print(f"  • Files documented: {memory_summary.get('files_documented', 0)}")
+        console.print()
+
+        # Show output location
+        console.print(Panel(
+            f"[info]Documentation output:[/]\n"
+            f"  {repo_path / '.agentic' / 'documentation'}\n\n"
+            f"[info]Memory storage:[/]\n"
+            f"  {repo_path / '.agentic' / 'memory'}\n\n"
+            f"[info]Debug logs:[/]\n"
+            f"  {repo_path / '.agentic' / 'doc_sessions'}",
+            title="Output Locations",
+            border_style="blue"
+        ))
+
+    finally:
+        await llm.close()
+
+
 def main():
     """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
-        description="Agentic CLI - Phase 1 Planning System",
+        description="Agentic CLI - Planning, Execution, and Documentation System",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -458,9 +582,49 @@ Examples:
   agentic /path/to/repo              # Start planning in specified repo
   agentic . --prompt "Add auth"      # Start with an initial prompt
   agentic . --model gpt-4o           # Use a different model
+  agentic document .                 # Generate documentation for repo
+  agentic document . --resume        # Resume interrupted documentation
         """
     )
     
+    # Create subparsers for commands
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Document subcommand
+    doc_parser = subparsers.add_parser(
+        "document",
+        help="Generate documentation for a repository using phased exploration"
+    )
+    doc_parser.add_argument(
+        "doc_repo_path",
+        type=str,
+        nargs="?",
+        default=".",
+        help="Path to the repository (default: current directory)"
+    )
+    doc_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from last saved state"
+    )
+    doc_parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Update documentation for changed files only"
+    )
+    doc_parser.add_argument(
+        "--model", "-m",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=f"Model to use (default: {DEFAULT_MODEL})"
+    )
+    doc_parser.add_argument(
+        "--api-key", "-k",
+        type=str,
+        help="OpenRouter API key (or set OPENROUTER_API_KEY env var)"
+    )
+
+    # Default planning command arguments (when no subcommand specified)
     parser.add_argument(
         "repo_path",
         type=str,
@@ -468,39 +632,67 @@ Examples:
         default=".",
         help="Path to the repository (default: current directory)"
     )
-    
+
     parser.add_argument(
         "--prompt", "-p",
         type=str,
         help="Initial prompt to start with"
     )
-    
+
     parser.add_argument(
         "--model", "-m",
         type=str,
         default=DEFAULT_MODEL,
         help=f"OpenRouter model to use (default: {DEFAULT_MODEL})"
     )
-    
+
     parser.add_argument(
         "--api-key", "-k",
         type=str,
         help="OpenRouter API key (or set OPENROUTER_API_KEY env var)"
     )
-    
+
     parser.add_argument(
         "--skip-discovery",
         action="store_true",
         help="Skip the Context Discovery Agent phase (go straight to planning)"
     )
-    
+
     parser.add_argument(
         "--no-semantic-search",
         action="store_true",
         help="Disable semantic search tool (for enterprises without embedding models)"
     )
-    
+
     args = parser.parse_args()
+
+    # Handle document command
+    if args.command == "document":
+        doc_repo_path = Path(args.doc_repo_path).resolve()
+        if not doc_repo_path.exists():
+            console.print(f"[error]Error: Path does not exist: {doc_repo_path}[/]")
+            sys.exit(1)
+        if not doc_repo_path.is_dir():
+            console.print(f"[error]Error: Path is not a directory: {doc_repo_path}[/]")
+            sys.exit(1)
+
+        mode = "full"
+        if args.resume:
+            mode = "resume"
+        elif args.update:
+            mode = "update"
+
+        try:
+            asyncio.run(run_documentation(
+                repo_path=doc_repo_path,
+                api_key=args.api_key,
+                model=args.model,
+                mode=mode,
+            ))
+        except KeyboardInterrupt:
+            console.print("\n[warning]Interrupted[/]")
+            sys.exit(130)
+        return
     
     # Build config from args
     config = get_config(Path(args.repo_path).resolve())

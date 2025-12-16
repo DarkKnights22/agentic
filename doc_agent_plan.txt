@@ -1,0 +1,337 @@
+Documentation Agent with Long-Term Memory
+
+Summary
+
+Redesign the Documentation Agent to use phased discovery with persistent, schema-driven memory instead of dumping the directory tree into context. The agent will explore incrementally, store findings in structured JSON files, and generate documentation only from memory (never raw code in context).
+
+---
+Architecture Overview
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    DocumentationAgent                           │
+├─────────────────────────────────────────────────────────────────┤
+│  Phase A: Architecture Discovery                                │
+│  Phase B: Component Deep Dives (isolated per-component)         │
+│  Phase C: Cross-Cutting Concerns                                │
+│  Phase D: Documentation Generation (from memory only)           │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      MemoryManager                              │
+│  - Persistent JSON storage in .agentic/memory/                  │
+│  - Schema-driven entries (architecture, component, file, etc.)  │
+│  - Index for fast lookups                                       │
+│  - Change detection for incremental updates                     │
+│  - BOUNDED RETRIEVAL (see Retrieval Contract)                   │
+└─────────────────────────────────────────────────────────────────┘
+
+---
+Key Design Principles
+
+1. No directory tree dumps - Agent uses tools to explore, never receives full tree
+2. Schema-driven memory - All discoveries stored as typed JSON entries
+3. Explicit retrieval - Agent queries memory before reasoning (never passive carry-forward)
+4. Component isolation - Each component explored in separate context
+5. Memory survives restarts - True long-term memory persisted to disk
+6. BOUNDED LOADS ONLY - Every retrieval specifies max_entries, required_fields, confidence
+7. EXPLORATION BUDGETS - Hard caps on file reads/greps per phase, force early summarization
+
+---
+Memory Storage Structure
+
+.agentic/
+├── memory/
+│   ├── index.json                    # Lookup index + phase tracking
+│   ├── architecture/
+│   │   └── overview.json             # Single architecture overview
+│   ├── components/
+│   │   └── {component_id}.json       # One per component
+│   ├── files/
+│   │   └── {hash}.json               # File roles
+│   ├── data_models/
+│   │   └── {model_id}.json
+│   ├── flows/
+│   │   └── {flow_id}.json
+│   └── cross_cutting/
+│       └── {concern}.json
+├── documentation/                    # Generated outputs
+│   ├── ARCHITECTURE.md
+│   ├── components/
+│   ├── diagrams/
+│   └── DATA_MODELS.md
+└── doc_sessions/
+    └── {session_id}.json             # Session logs
+
+---
+Memory Schemas
+
+ArchitectureOverview
+
+- system_name, purpose, tech_stack
+- entry_points, major_components
+- architectural_style, key_abstractions
+- component_boundaries
+- confidence, verified_by_files
+
+ComponentSummary
+
+- component_name, root_path, responsibility
+- key_files, public_interfaces
+- dependencies, dependents
+- design_patterns_used
+- confidence, explored_files
+
+FileRole
+
+- file_path, responsibility, layer, component
+- key_exports, key_functions, key_classes
+- imports_from, imported_by
+- last_read_hash (for change detection)
+
+DataModel, RuntimeFlow, CrossCuttingConcern
+
+- Similar structured schemas for each entry type
+
+---
+Phase Workflow
+
+Phase A: Architecture Discovery
+
+Goal: High-level system shape (not deep details)
+
+Finds: Entry points, major components, tech stack, architectural style
+
+Tools: grep, read_file (only entry points), list_files, get_symbols
+
+Output: ArchitectureOverview + component list for Phase B
+
+Transition: Architecture stored with confidence > 0.7
+
+---
+Phase B: Component Deep Dives
+
+Goal: Fully understand each component in isolation
+
+For each component:
+- Load fresh context (no other components)
+- Explore all files in component
+- Map interfaces, dependencies, data models, flows
+
+Output per component: ComponentSummary, FileRole entries, DataModel entries
+
+Transition: All components explored with confidence > 0.7
+
+---
+Phase C: Cross-Cutting Concerns
+
+Goal: Document concerns spanning multiple components
+
+Concerns: Authentication, Configuration, Logging, Error handling, Data access
+
+Output: CrossCuttingConcern entries + updates to existing component entries
+
+Transition: No new concerns found in 2 consecutive rounds
+
+---
+Phase D: Documentation Generation
+
+Goal: Generate docs from memory only (no raw code)
+
+Input: Only structured memory entries (bounded queries)
+
+Output:
+- ARCHITECTURE.md
+- components/{name}.md
+- DATA_MODELS.md
+- diagrams/*.mmd (Mermaid)
+
+---
+EXPLORATION BUDGETS (CRITICAL)
+
+Problem: Even with bounded memory retrieval, the agent can still explode context
+during exploration by opening too many files, over-grepping, or doing "just one
+more check." Phases don't help if exploration within a phase is unbounded.
+
+Hard limits per phase:
+
+Phase A (Architecture Discovery):
+- max_files_read: 10
+- max_grep_calls: 15
+- max_symbols_calls: 5
+- MUST summarize and store after budget exhausted, then STOP
+
+Phase B (Component Deep Dive) — per component:
+- max_files_read: 20 per component
+- max_grep_calls: 10 per component
+- If component has >20 files, sample strategically (entry points, interfaces, tests)
+- MUST store ComponentSummary before moving to next component
+
+Phase C (Cross-Cutting):
+- max_cross_component_queries: 5
+- max_files_read: 15 total
+- Works from memory first, only reads files to verify
+
+Phase D (Doc Generation):
+- max_memory_queries: 20
+- NO file reads allowed — memory only
+
+Enforcement:
+- PhaseOrchestrator tracks tool call counts
+- Tools check budget before executing, return error if exceeded
+- Agent receives "BUDGET_EXHAUSTED: Summarize findings and store to memory"
+- No exceptions — force early summarization over perfect exploration
+
+Anti-patterns:
+❌ "Let me check one more file to be sure"
+❌ Grepping the same pattern with slight variations
+❌ Reading all files in a directory "to be thorough"
+
+Correct behavior:
+✅ Read entry point → form hypothesis → verify with 2-3 targeted reads → store
+✅ Hit budget limit → summarize what you know with confidence score → move on
+✅ Low confidence? Flag for re-exploration in next session, don't exceed budget
+
+---
+RETRIEVAL CONTRACT (CRITICAL)
+
+Problem: JSON storage ≠ retrieval strategy. Without bounds, we recreate
+"large prompt from memory" instead of "large prompt from code" — same issue.
+
+Every query_memory() call MUST specify:
+
+@dataclass
+class MemoryQuery:
+    query_type: str           # "architecture" | "component" | "file" | "flow"
+    filter_by: dict           # e.g., {"component": "auth", "layer": "api"}
+    max_entries: int          # REQUIRED - hard cap, NO DEFAULT
+    required_fields: list[str] # Only return these fields, not full entries
+    min_confidence: float     # 0.0-1.0, filter uncertain/stale entries
+    sort_by: str = "relevance" # "relevance" | "recency" | "confidence"
+
+Guardrails:
+- max_entries has NO DEFAULT — forces explicit thinking about load size
+- required_fields prevents loading full entry when only name+path needed
+- min_confidence filters out uncertain discoveries
+- Total context budget per phase (e.g., 8K tokens max for memory loads)
+
+Anti-patterns (NEVER do):
+❌ query_memory("components")                    # unbounded, returns everything
+❌ query_memory(type="file", max_entries=999)   # fake limit circumvents purpose
+❌ Loading full FileRole when only paths needed  # field bloat
+
+Correct patterns:
+✅ query_memory(type="component", filter_by={"name": "auth"}, max_entries=1,
+               required_fields=["interfaces", "dependencies"], min_confidence=0.7)
+✅ query_memory(type="file", filter_by={"component": "auth"}, max_entries=20,
+               required_fields=["path", "responsibility"], min_confidence=0.7)
+
+---
+New Tools for Documentation Agent
+
+query_memory(query: MemoryQuery) -> list[dict]  # Bounded retrieval ONLY
+store_discovery(entry_type, data)               # Store new memory entry
+get_phase_context()                             # Current phase + progress
+mark_explored(target_type, target_id)           # Signal completion
+estimate_token_usage(query: MemoryQuery) -> int # Preview load size before executing
+
+---
+Files to Create
+
+| File           | Purpose                              |
+|----------------|--------------------------------------|
+| doc_agent.py   | Main DocumentationAgent class        |
+| doc_memory.py  | Memory schemas + MemoryManager       |
+| doc_phases.py  | PhaseOrchestrator + phase logic      |
+| doc_tools.py   | Memory query/store tools             |
+| doc_writer.py  | Documentation generation from memory |
+| doc_prompts.py | LLM prompts for each phase           |
+
+---
+Files to Reference (patterns to follow)
+
+| Existing File              | Reuse                                             |
+|----------------------------|---------------------------------------------------|
+| state_manager.py           | Disk persistence pattern, dataclass serialization |
+| context_discovery_agent.py | Phased exploration, tool execution loop           |
+| master_agent.py            | Tool parsing, LLM interaction                     |
+| tools.py                   | Existing grep, read_file, get_symbols             |
+| openrouter_client.py       | LLM client interface                              |
+
+---
+Implementation Sequence
+
+Step 1: Memory System
+
+1. Create doc_memory.py with all schema dataclasses
+2. Implement MemoryManager (CRUD, index, BOUNDED queries)
+3. Add change detection (file hash comparison)
+4. Implement retrieval contract enforcement (reject unbounded queries)
+
+Step 2: Phase Orchestration
+
+1. Create doc_phases.py with PhaseOrchestrator
+2. Implement phase state persistence
+3. Add context builders for each phase (with token budgets)
+4. Implement exploration budget tracking (file reads, greps, queries per phase)
+5. Add budget enforcement — tools return error when exceeded
+
+Step 3: Core Agent
+
+1. Create doc_agent.py with DocumentationAgent
+2. Integrate existing LLM client + tools
+3. Add memory-aware reasoning loop
+
+Step 4: Phases A-C
+
+1. Create doc_prompts.py with phase-specific prompts
+2. Implement architecture discovery (Phase A)
+3. Implement component deep dives (Phase B)
+4. Implement cross-cutting concerns (Phase C)
+
+Step 5: Documentation Generation
+
+1. Create doc_writer.py
+2. Implement markdown generation from memory
+3. Implement Mermaid diagram generation
+
+Step 6: Incremental Updates
+
+1. Implement change detection workflow
+2. Selective re-exploration
+3. Documentation merging
+
+Step 7: CLI Integration
+
+1. Add document command (--full, --resume, --update)
+2. Progress reporting
+
+---
+Public API
+
+agent = DocumentationAgent(repo_path)
+
+# Full run through all phases
+await agent.run_full_documentation()
+
+# Resume from last saved state
+await agent.resume()
+
+# Update only for changed files
+await agent.update_documentation()
+
+# Inspect state
+agent.get_memory_summary()
+agent.get_documentation_status()
+
+---
+Critical Success Criteria (from design doc)
+
+The system is correctly designed if:
+- Working context can be wiped between steps
+- Agent can restart and still understand the architecture
+- Documentation is generated from memory only, never raw code
+- NO UNBOUNDED MEMORY LOADS — every query has explicit limits
+- EXPLORATION STAYS WITHIN BUDGET — agent summarizes early vs. over-exploring
+
+If any of these fail, context is still being misused as memory.

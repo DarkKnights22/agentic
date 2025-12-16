@@ -32,6 +32,12 @@ from .tools import apply_patch, run_tests, PatchResult, TestResult
 from .sub_agent import SubAgent, TaskContext, SubAgentResult
 from .execution_engine import ExecutionEngine, ExecutionSummary, run_execution
 
+# Documentation Agent (Long-Term Memory)
+from .doc_agent import DocumentationAgent, DocAgentConfig, document_repository
+from .doc_memory import MemoryManager, MemoryQuery, MemoryQueryError
+from .doc_phases import PhaseOrchestrator, Phase
+from .doc_writer import DocWriter
+
 __all__ = [
     # Enterprise Integration (NEW)
     "LLMClient",          # Abstract base for custom LLM implementations
@@ -85,5 +91,16 @@ __all__ = [
     
     # Master Agent
     "MasterAgent",
+
+    # Documentation Agent (Long-Term Memory)
+    "DocumentationAgent",
+    "DocAgentConfig",
+    "document_repository",
+    "MemoryManager",
+    "MemoryQuery",
+    "MemoryQueryError",
+    "PhaseOrchestrator",
+    "Phase",
+    "DocWriter",
 ]
 
